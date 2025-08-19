@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quick Scanner</title>
+<style>
+  :root { --brand:#0b74ff; --bg:#0e1117; --card:#161b22; --text:#e6edf3; --muted:#9da7b1; --ok:#2ea44f; --warn:#f59e0b; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+  .wrap { min-height: 100svh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .card { width:min(680px, 100%); background:var(--card); border:1px solid #262c36; border-radius:16px; padding:18px; box-shadow:0 8px 30px rgba(0,0,0,.35); }
+  h1 { margin:0 0 8px; font-size:20px; text-align:center; }
+  p.small { margin: 4px 0 14px; color:var(--muted); text-align:center; font-size:13px; }
+  .btn {
+    width:100%; padding:14px 16px; font-weight:700; border:none; border-radius:12px; color:#fff; background:var(--brand);
+    cursor:pointer; font-size:16px; transition:.2s transform ease;
+  }
+  .btn:active { transform: translateY(1px) scale(.995); }
+  .live {
+    margin-top:14px; position:relative; border-radius:12px; overflow:hidden; border:1px solid #27303b; background:#000;
+    aspect-ratio: 3/4; /* tall portrait-ish window that adapts */
+  }
+  video { width:100%; height:100%; object-fit:cover; display:block; }
+  canvas { display:none; } /* used for BarcodeDetector frame capture if needed */
+  .overlay {
+    position:absolute; inset:0; pointer-events:none; box-shadow: inset 0 0 0 2px rgba(255,255,255,.12);
+  }
+  .hint {
+    margin-top:10px; color:var(--muted); font-size:12px; text-align:center;
+  }
+  .row { display:flex; gap:10px; margin-top:10px; }
+  .row .btn { flex:1; }
+  .result {
+    margin-top:12px; padding:10px; border-radius:10px; background:#0b1220; border:1px solid #233147;
+    font-size:14px; word-break:break-word;
+  }
+  .result strong { color: var(--ok); }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Quick Scanner</h1>
+    <p class="small">Tap <b>Scan</b> to open your camera. When a code is detected, your phone will <b>beep</b> and <b>vibrate</b>.</p>
+
+    <button id="btnScan" class="btn">📷 Scan</button>
+
+    <div id="live" class="live hidden" aria-label="Live camera preview">
+      <video id="video" playsinline autoplay muted></video>
+      <div class="overlay"></div>
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div class="row hidden" id="controls">
+      <button id="btnStop" class="btn" style="background:#374151;">✋ Stop</button>
+      <button id="btnTorch" class="btn" style="background:#f59e0b;">🔦 Torch</button>
+    </div>
+
+    <div id="out" class="result hidden"></div>
+    <p class="hint">Tip: hold steady, fill the frame, and try to scan in good light.</p>
+  </div>
+</div>
+
+<!-- ZXing fallback (only used if BarcodeDetector is unavailable) -->
+<script src="https://unpkg.com/@zxing/browser@latest"></script>
+<script>
+(function () {
+  const btnScan = document.getElementById('btnScan');
+  const btnStop = document.getElementById('btnStop');
+  const btnTorch = document.getElementById('btnTorch');
+  const live = document.getElementById('live');
+  const controls = document.getElementById('controls');
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const out = document.getElementById('out');
+
+  let stream = null;
+  let scanning = false;
+  let usingZXing = false;
+  let zxingReader = null;
+  let zxingCtrl = null;
+  let lastPayload = '';
+  let audioCtx = null;
+  let torchOn = false;
+  let videoTrack = null;
+
+  // Prepare audio beep (AudioContext created on first user gesture)
+  function beep(duration=160, freq=880) {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.value = 0.06; // soft beep
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      setTimeout(() => { osc.stop(); }, duration);
+    } catch (e) {
+      // as fallback, do nothing
+    }
+  }
+
+  function vibrate() {
+    if (navigator.vibrate) {
+      navigator.vibrate([120, 40, 120]); // buzz-buzz
+    }
+  }
+
+  function show(el){ el.classList.remove('hidden'); }
+  function hide(el){ el.classList.add('hidden'); }
+
+  function showResult(text) {
+    out.innerHTML = `<strong>Detected:</strong><br>${escapeHtml(text)}`;
+    show(out);
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, (m)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+  }
+
+  async function startCamera() {
+    // Prefer rear camera on phones
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    await video.play();
+    videoTrack = stream.getVideoTracks()[0] || null;
+    show(live);
+    show(controls);
+  }
+
+  function stopCamera() {
+    if (zxingCtrl) { zxingCtrl.stop(); zxingCtrl = null; }
+    if (zxingReader) { try { zxingReader.reset(); } catch(e){} zxingReader = null; }
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      videoTrack = null;
+    }
+    hide(live);
+    hide(controls);
+    scanning = false;
+    usingZXing = false;
+    torchOn = false;
+    btnTorch.textContent = '🔦 Torch';
+  }
+
+  async function toggleTorch() {
+    if (!videoTrack) return;
+    const caps = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
+    if (!caps.torch) {
+      alert('Torch not supported on this device/browser.');
+      return;
+    }
+    torchOn = !torchOn;
+    try {
+      await videoTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
+      btnTorch.textContent = torchOn ? '🔦 Torch On' : '🔦 Torch';
+    } catch (e) {
+      alert('Failed to toggle torch.');
+    }
+  }
+
+  async function startScan() {
+    if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
+      alert('Camera access is not supported in this browser.');
+      return;
+    }
+    lastPayload = '';
+    showResult('Waiting for code…');
+    scanning = true;
+    await startCamera();
+
+    // Prefer native BarcodeDetector if available
+    if ('BarcodeDetector' in window) {
+      usingZXing = false;
+      const supported = await window.BarcodeDetector.getSupportedFormats();
+      const formats = [
+        'qr_code',
+        'aztec',
+        'code_128',
+        'code_39',
+        'code_93',
+        'data_matrix',
+        'ean_13',
+        'ean_8',
+        'pdf417',
+        'upc_a',
+        'upc_e'
+      ].filter(f => supported.includes(f));
+      const detector = new window.BarcodeDetector({ formats });
+
+      // Detect directly on the <video> element
+      const loop = async () => {
+        if (!scanning) return;
+        try {
+          const barcodes = await detector.detect(video);
+          if (barcodes && barcodes.length) {
+            const raw = barcodes[0].rawValue || '';
+            if (raw && raw !== lastPayload) {
+              lastPayload = raw;
+              beep();
+              vibrate();
+              showResult(raw);
+              // Keep scanning; comment the next line if you want to auto-stop on first hit
+              // stopCamera();
+            }
+          }
+        } catch (e) {
+          // ignore frame errors and continue
+        }
+        requestAnimationFrame(loop);
+      };
+      loop();
+    } else {
+      // Fallback to ZXing
+      usingZXing = true;
+      const { BrowserMultiFormatReader, NotFoundException } = ZXing;
+      zxingReader = new BrowserMultiFormatReader();
+      zxingCtrl = await zxingReader.decodeFromVideoDevice(
+        undefined, // auto-select camera
+        video,
+        (result, err, controls) => {
+          // Keep the controls around so we can stop later
+          zxingCtrl = controls;
+          if (result) {
+            const text = result.getText ? result.getText() : String(result);
+            if (text && text !== lastPayload) {
+              lastPayload = text;
+              beep();
+              vibrate();
+              showResult(text);
+              // stopCamera(); // uncomment to stop after first hit
+            }
+          } else if (err && !(err instanceof NotFoundException)) {
+            // Non-"not found" errors can be shown if helpful
+            // console.debug(err);
+          }
+        }
+      );
+    }
+  }
+
+  // Wire up buttons
+  btnScan.addEventListener('click', startScan, { passive: true });
+  btnStop.addEventListener('click', stopCamera, { passive: true });
+  btnTorch.addEventListener('click', toggleTorch, { passive: true });
+
+})();
+</script>
+</body>
+</html>
