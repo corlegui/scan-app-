@@ -1,105 +1,168 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QR & Barcode Scanner</title>
-  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      text-align: center;
-      margin: 0;
-      padding: 20px;
-    }
-    #reader {
-      width: 100%;
-      max-width: 400px;
-      margin: auto;
-    }
-    #result {
-      margin-top: 20px;
-      font-size: 18px;
-      font-weight: bold;
-      color: #333;
-    }
-    button {
-      margin-top: 10px;
-      padding: 10px 20px;
-      font-size: 16px;
-      background: #007bff;
-      border: none;
-      color: white;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    button:hover {
-      background: #0056b3;
-    }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Tap to Scan</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.9/html5-qrcode.min.js"></script>
+<style>
+  :root { --bg:#0e1117; --card:#161b22; --text:#e6edf3; --muted:#9da7b1; --accent:#0b74ff; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  .wrap{min-height:100svh;display:flex;align-items:center;justify-content:center;padding:18px}
+  .card{width:min(720px,100%);background:var(--card);border:1px solid #232a35;border-radius:16px;padding:16px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+  h1{margin:0 0 10px;text-align:center;font-size:20px}
+  p.small{margin:0 0 12px;color:var(--muted);text-align:center;font-size:13px}
+  #reader-wrap{position:relative;border:1px solid #2a3340;border-radius:12px;overflow:hidden;background:#000}
+  /* Give the scanner a real height so it renders */
+  #reader{width:100%; height: 65svh; max-height: 520px; min-height: 260px;}
+  .veil{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(transparent,rgba(0,0,0,.28) 40%,rgba(0,0,0,.55));
+    color:#fff;font-weight:700;letter-spacing:.3px;text-shadow:0 2px 10px rgba(0,0,0,.45);user-select:none;cursor:pointer
+  }
+  .veil .hint{background:rgba(0,0,0,.45);padding:10px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.15)}
+  .hidden{display:none!important}
+  .result{margin-top:12px;padding:10px;border-radius:10px;background:#0b1220;border:1px solid #213047;font-size:14px;word-break:break-word}
+  .result strong{color:#2ea44f}
+  .error{margin-top:10px;color:#ffb4b4;font-size:13px}
+  .btn{margin-top:8px;padding:10px 14px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-weight:700}
+</style>
 </head>
 <body>
-  <h2>Tap Anywhere to Start Scanning</h2>
-  <div id="reader"></div>
-  <div id="result"></div>
+<div class="wrap">
+  <div class="card">
+    <h1>Tap to Scan</h1>
+    <p class="small">Tap the camera area to start/stop. Links open automatically; other data shows a Google lookup button.</p>
 
-  <script>
-    let lastPayload = "";
-    const reader = new Html5Qrcode("reader");
+    <div id="reader-wrap">
+      <div id="reader"></div>
+      <div id="veil" class="veil"><div class="hint">Tap to Scan</div></div>
+    </div>
 
-    function beep() {
-      const ctx = new AudioContext();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = "sine";
-      osc.frequency.value = 1000;
+    <div id="result" class="result" style="display:none"></div>
+    <div id="err" class="error"></div>
+  </div>
+</div>
+
+<script>
+  const readerEl = document.getElementById('reader');
+  const veil = document.getElementById('veil');
+  const resultEl = document.getElementById('result');
+  const errEl = document.getElementById('err');
+
+  let scanner = null;
+  let running = false;
+  let lastText = '';
+  let audioCtx = null;
+
+  function beep(ms=140, hz=1000){
+    try{
+      if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type='square'; osc.frequency.value = hz;
+      gain.gain.value = 0.07;
+      osc.connect(gain).connect(audioCtx.destination);
       osc.start();
-      gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.2);
+      setTimeout(()=>osc.stop(), ms);
+    }catch(e){}
+  }
+  function vibrate(){ if(navigator.vibrate) navigator.vibrate([120]); }
+
+  function isLikelyURL(s){
+    if(!s) return false;
+    const t = s.trim();
+    if(/^https?:\/\//i.test(t) || /^www\./i.test(t)) return true;
+    return /^[a-z0-9.-]+\.[a-z]{2,}(\/|\?|#|$)/i.test(t);
+  }
+
+  function showResult(text){
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = `<strong>Scanned:</strong><br>${text.replace(/[&<>]/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;' }[m]))}`;
+    if(!isLikelyURL(text)){
+      const btn = document.createElement('button');
+      btn.className='btn';
+      btn.textContent = 'Lookup on Google';
+      btn.onclick = ()=> window.open('https://www.google.com/search?q=' + encodeURIComponent(text),'_blank');
+      resultEl.appendChild(btn);
+    }
+  }
+
+  async function start(){
+    if(running) return stop(); // toggle
+    errEl.textContent = '';
+    resultEl.style.display='none';
+    lastText = '';
+
+    // Ensure HTTPS
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost'){
+      errEl.textContent = 'This page must be served over HTTPS to access the camera (GitHub Pages is HTTPS).';
+      return;
     }
 
-    function vibrate() {
-      if (navigator.vibrate) navigator.vibrate(200);
-    }
-
-    function isLikelyURL(text) {
-      return text.startsWith("http://") || text.startsWith("https://") || text.includes(".");
-    }
-
-    function handlePayload(text) {
-      if (!text || text === lastPayload) return;
-      lastPayload = text;
-
-      beep();
-      vibrate();
-
-      const out = document.getElementById("result");
-      out.innerHTML = `Scanned: <span style="color:green">${text}</span>`;
-
-      if (isLikelyURL(text)) {
-        setTimeout(() => {
-          window.location.href = text.startsWith("http") ? text : "https://" + text;
-        }, 800);
-      } else {
-        // Show Lookup button
-        const btn = document.createElement("button");
-        btn.textContent = "Lookup Online";
-        btn.onclick = () => {
-          window.open("https://www.google.com/search?q=" + encodeURIComponent(text), "_blank");
-        };
-        out.appendChild(btn);
+    try{
+      if(!scanner) scanner = new Html5Qrcode('reader');
+      await scanner.start(
+        { facingMode: { exact: 'environment' } }, // try rear camera
+        { fps: 12, aspectRatio: 1.33, qrbox: (viewW, viewH) => {
+            // dynamic scan region ~70% of the smallest side
+            const s = Math.floor(Math.min(viewW, viewH) * 0.7);
+            return { width:s, height:s };
+          }
+        },
+        onScan,
+        onScanFail
+      );
+      running = true;
+      veil.classList.add('hidden');
+    }catch(e){
+      // Fallback: try without exact facingMode
+      try{
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 12 },
+          onScan,
+          onScanFail
+        );
+        running = true;
+        veil.classList.add('hidden');
+      }catch(err){
+        errEl.textContent = 'Could not start camera: ' + (err?.message || err);
       }
     }
+  }
 
-    // Start scanner when user taps anywhere
-    document.body.addEventListener("click", () => {
-      reader.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: 250 },
-        handlePayload
-      ).catch(err => console.error(err));
-    }, { once: true });
-  </script>
+  async function stop(){
+    try{ await scanner?.stop(); }catch(e){}
+    running = false;
+    veil.classList.remove('hidden');
+  }
+
+  function onScan(decodedText){
+    if(!decodedText || decodedText === lastText) return;
+    lastText = decodedText;
+    beep(); vibrate();
+
+    if(isLikelyURL(decodedText)){
+      const href = /^https?:\/\//i.test(decodedText) ? decodedText : 'https://' + decodedText.trim();
+      stop().finally(()=> window.location.href = href);
+    }else{
+      showResult(decodedText);
+      // keep scanning
+    }
+  }
+  function onScanFail(){ /* ignore per-frame failures */ }
+
+  // Tap to start/stop
+  document.getElementById('reader-wrap').addEventListener('click', start, { passive:true });
+  // Stop when tab hidden
+  document.addEventListener('visibilitychange', ()=>{ if(document.hidden) stop(); });
+
+  // Small guard: show an error if the library failed to load
+  if(!window.Html5Qrcode){
+    errEl.textContent = 'Scanner library failed to load. Check your network / CSP.';
+  }
+</script>
 </body>
 </html>
