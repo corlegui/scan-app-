@@ -1,202 +1,105 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Tap to Scan</title>
-<style>
-  :root { --brand:#0b74ff; --bg:#0e1117; --card:#161b22; --text:#e6edf3; --muted:#9da7b1; --ok:#2ea44f; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
-  .wrap { min-height: 100svh; display:flex; align-items:center; justify-content:center; padding:18px; }
-  .card { width:min(720px, 100%); background:var(--card); border:1px solid #262c36; border-radius:16px; padding:16px; box-shadow:0 8px 30px rgba(0,0,0,.35); }
-  h1 { margin:2px 0 8px; font-size:20px; text-align:center; }
-  p.small { margin: 0 0 12px; color:var(--muted); text-align:center; font-size:13px; }
-  .live {
-    margin-top:10px; position:relative; border-radius:12px; overflow:hidden; border:1px solid #27303b; background:#000;
-    aspect-ratio: 3/4;
-  }
-  video { width:100%; height:100%; object-fit:cover; display:block; }
-  .tap-veil {
-    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-    background:linear-gradient(transparent, rgba(0,0,0,.25) 40%, rgba(0,0,0,.45));
-    color:#fff; font-weight:700; letter-spacing:.3px; text-shadow:0 2px 10px rgba(0,0,0,.45);
-    user-select:none;
-  }
-  .tap-veil .hint {
-    background:rgba(0,0,0,.45);
-    padding:10px 16px; border-radius:999px; border:1px solid rgba(255,255,255,.15);
-  }
-  .veil-hidden { display:none; }
-  canvas { display:none; }
-  .result {
-    margin-top:12px; padding:10px; border-radius:10px; background:#0b1220; border:1px solid #233147;
-    font-size:14px; word-break:break-word;
-  }
-  .result strong { color: var(--ok); }
-  .footer { margin-top:8px; text-align:center; color:var(--muted); font-size:12px; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QR & Barcode Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 20px;
+    }
+    #reader {
+      width: 100%;
+      max-width: 400px;
+      margin: auto;
+    }
+    #result {
+      margin-top: 20px;
+      font-size: 18px;
+      font-weight: bold;
+      color: #333;
+    }
+    button {
+      margin-top: 10px;
+      padding: 10px 20px;
+      font-size: 16px;
+      background: #007bff;
+      border: none;
+      color: white;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+  </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="card">
-    <h1>Tap to Scan</h1>
-    <p class="small">Tap the camera preview to start or stop scanning. On scan it will <b>beep</b> and <b>vibrate</b>. URLs open automatically.</p>
+  <h2>Tap Anywhere to Start Scanning</h2>
+  <div id="reader"></div>
+  <div id="result"></div>
 
-    <div id="live" class="live" aria-label="Live camera preview">
-      <video id="video" playsinline autoplay muted></video>
-      <div id="veil" class="tap-veil">
-        <div class="hint">Tap to Scan</div>
-      </div>
-      <canvas id="canvas"></canvas>
-    </div>
+  <script>
+    let lastPayload = "";
+    const reader = new Html5Qrcode("reader");
 
-    <div id="out" class="result" style="display:none;"></div>
-    <div class="footer">Works best on Chrome for Android over HTTPS.</div>
-  </div>
-</div>
-
-<!-- ZXing fallback (only used if BarcodeDetector is unavailable) -->
-<script src="https://unpkg.com/@zxing/browser@latest"></script>
-<script>
-(function () {
-  const live = document.getElementById('live');
-  const video = document.getElementById('video');
-  const veil  = document.getElementById('veil');
-  const out   = document.getElementById('out');
-
-  let stream = null;
-  let scanning = false;
-  let usingZXing = false;
-  let zxingReader = null;
-  let zxingCtrl = null;
-  let lastPayload = '';
-  let audioCtx = null;
-
-  // --- helpers ---
-  function showResult(text) { out.style.display = 'block'; out.innerHTML = `<strong>Scanned:</strong><br>${escapeHtml(text)}`; }
-  function clearResult() { out.style.display = 'none'; out.textContent = ''; }
-  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-
-  function beep(duration=140, freq=1000) {
-    try {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = freq;
-      gain.gain.value = 0.07;
-      osc.connect(gain).connect(audioCtx.destination);
+    function beep() {
+      const ctx = new AudioContext();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.value = 1000;
       osc.start();
-      setTimeout(()=>osc.stop(), duration);
-    } catch {}
-  }
-  function vibrate() { if (navigator.vibrate) navigator.vibrate([120]); }
-
-  function isLikelyURL(s){
-    if (!s) return false;
-    const t = s.trim();
-    if (/^https?:\/\//i.test(t)) return true;
-    if (/^www\./i.test(t)) return true;
-    // simple domain.tld/path? check
-    return /^[a-z0-9.-]+\.[a-z]{2,}(\/|\?|#|$)/i.test(t);
-  }
-
-  async function startCamera() {
-    const constraints = {
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
-    };
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
-    video.srcObject = stream;
-    await video.play();
-  }
-
-  function stopCamera() {
-    if (zxingCtrl) { zxingCtrl.stop(); zxingCtrl = null; }
-    if (zxingReader) { try { zxingReader.reset(); } catch(e){} zxingReader = null; }
-    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-    scanning = false;
-  }
-
-  async function startScan() {
-    if (scanning) { stopCamera(); veil.classList.remove('veil-hidden'); return; }
-
-    if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
-      alert('Camera access is not supported in this browser.');
-      return;
+      gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.2);
     }
 
-    lastPayload = '';
-    clearResult();
-    veil.classList.add('veil-hidden');
-    await startCamera();
-    scanning = true;
-
-    if ('BarcodeDetector' in window) {
-      usingZXing = false;
-      const supported = await window.BarcodeDetector.getSupportedFormats();
-      const formats = [
-        'qr_code','aztec','code_128','code_39','code_93','data_matrix','ean_13','ean_8','pdf417','upc_a','upc_e'
-      ].filter(f => supported.includes(f));
-      const detector = new window.BarcodeDetector({ formats });
-
-      const loop = async () => {
-        if (!scanning) return;
-        try {
-          const codes = await detector.detect(video);
-          if (codes && codes.length) handlePayload(codes[0].rawValue || '');
-        } catch {}
-        requestAnimationFrame(loop);
-      };
-      loop();
-    } else {
-      usingZXing = true;
-      const { BrowserMultiFormatReader, NotFoundException } = ZXing;
-      zxingReader = new BrowserMultiFormatReader();
-      zxingCtrl = await zxingReader.decodeFromVideoDevice(undefined, video, (result, err, controls) => {
-        zxingCtrl = controls;
-        if (result) {
-          const text = result.getText ? result.getText() : String(result);
-          handlePayload(text);
-        } else if (err && !(err instanceof NotFoundException)) {
-          // ignore non-not-found errors
-        }
-      });
+    function vibrate() {
+      if (navigator.vibrate) navigator.vibrate(200);
     }
-  }
 
-  function handlePayload(text){
-    if (!text) return;
-    if (text === lastPayload) return;
-    lastPayload = text;
-
-    // Beep + vibrate on every new scan
-    beep(); vibrate();
-
-    if (isLikelyURL(text)) {
-      // Open the link (ensure a protocol)
-      const href = /^https?:\/\//i.test(text) ? text.trim() : ('https://' + text.trim());
-      // Stop scanning before navigating
-      stopCamera();
-      window.location.href = href;
-    } else {
-      // Show data and continue scanning
-      showResult(text);
+    function isLikelyURL(text) {
+      return text.startsWith("http://") || text.startsWith("https://") || text.includes(".");
     }
-  }
 
-  // Tap anywhere on the preview to toggle scan
-  live.addEventListener('click', startScan, { passive:true });
+    function handlePayload(text) {
+      if (!text || text === lastPayload) return;
+      lastPayload = text;
 
-  // If the page is hidden, stop the camera for safety
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      stopCamera();
-      veil.classList.remove('veil-hidden');
+      beep();
+      vibrate();
+
+      const out = document.getElementById("result");
+      out.innerHTML = `Scanned: <span style="color:green">${text}</span>`;
+
+      if (isLikelyURL(text)) {
+        setTimeout(() => {
+          window.location.href = text.startsWith("http") ? text : "https://" + text;
+        }, 800);
+      } else {
+        // Show Lookup button
+        const btn = document.createElement("button");
+        btn.textContent = "Lookup Online";
+        btn.onclick = () => {
+          window.open("https://www.google.com/search?q=" + encodeURIComponent(text), "_blank");
+        };
+        out.appendChild(btn);
+      }
     }
-  });
-})();
-</script>
+
+    // Start scanner when user taps anywhere
+    document.body.addEventListener("click", () => {
+      reader.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: 250 },
+        handlePayload
+      ).catch(err => console.error(err));
+    }, { once: true });
+  </script>
 </body>
 </html>
